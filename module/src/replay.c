@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -33,6 +34,7 @@ struct uinput_setup { struct input_id id; char name[80]; uint32_t ff; };
 #define UI_DEV_SETUP _IOW('U', 3, struct uinput_setup)
 #define UI_SET_EVBIT _IOW('U', 100, int)
 #define UI_SET_KEYBIT _IOW('U', 101, int)
+#define UI_SET_PHYS _IOW('U', 108, char *)
 
 #define LOG(...) do{printf("[penbridge] " __VA_ARGS__);printf("\n");fflush(stdout);}while(0)
 
@@ -75,6 +77,7 @@ static int make_keyboard(int src){
     ioctl(fd,UI_SET_KEYBIT,KEY_F19);
     struct uinput_setup us; memset(&us,0,sizeof us);
     snprintf(us.name,sizeof us.name,"Xiaomi Focus Pen Pro Keyboard");
+    ioctl(fd,UI_SET_PHYS,"penbridge-virtual");
     us.id.bustype=0x0005; us.id.vendor=0x0022; us.id.product=0x5081; us.id.version=0x0111;
     if(ioctl(fd,UI_DEV_SETUP,&us)<0){perror("UI_DEV_SETUP");close(fd);return -1;}
     if(ioctl(fd,UI_DEV_CREATE)<0){perror("UI_DEV_CREATE");close(fd);return -1;}
@@ -96,7 +99,29 @@ static void tap(int ufd){
     emit(ufd,KEY_F19,0);
 }
 
+
+/* The framework may restart (soft reboot) without killing us: the uinput device then
+   disappears from /sys/class/input and every injected key goes nowhere. Detect that by
+   the unique phys string we registered and rebuild the device. */
+static int vkbd_present(void){
+    DIR *d=opendir("/sys/class/input"); if(!d) return 1;
+    struct dirent *de; int found=0;
+    while((de=readdir(d))){
+        if(strncmp(de->d_name,"event",5)) continue;
+        char p[160]; snprintf(p,sizeof p,"/sys/class/input/%s/device/phys",de->d_name);
+        int f=open(p,O_RDONLY|O_CLOEXEC); if(f<0) continue;
+        char buf[128]={0}; ssize_t n=read(f,buf,sizeof buf-1); close(f);
+        if(n>0&&strstr(buf,"penbridge-virtual")){found=1;break;}
+    }
+    closedir(d); return found;
+}
+
 int main(void){
+    /* Single instance: a framework soft-reboot can leave an old supervisor alive while a new
+       one starts. flock makes the loser exit immediately instead of fighting over the device. */
+    int lock=open("/data/adb/penbridge.lock",O_RDWR|O_CREAT|O_CLOEXEC,0600);
+    if(lock>=0 && flock(lock,LOCK_EX|LOCK_NB)<0){ fprintf(stderr,"[penbridge] already running\n"); return 0; }
+
     signal(SIGINT,onsig); signal(SIGTERM,onsig);
     setvbuf(stdout,NULL,_IOLBF,0);
     int ufd=-1, pressed=0, restored=1;
@@ -114,10 +139,19 @@ int main(void){
         LOG("grabbed %s",path);
         if(ufd<0){ ufd=make_keyboard(src); if(ufd<0){ ioctl(src,EVIOCGRAB,0); close(src); return 1; } }
         struct pollfd p={.fd=src,.events=POLLIN};
+        int tick=0;
         while(!stop){
             int pr=poll(&p,1,500);
             if(pr<0&&errno==EINTR) continue;
-            if(pr<=0) continue;
+            if(pr<=0){
+                if(++tick%10==0&&!vkbd_present()){
+                    LOG("virtual keyboard disappeared, rebuilding");
+                    ioctl(ufd,UI_DEV_DESTROY); close(ufd);
+                    ufd=make_keyboard(src);
+                    if(ufd<0){ LOG("rebuild failed, exiting"); break; }
+                }
+                continue;
+            }
             struct input_event ev; ssize_t n;
             while((n=read(src,&ev,sizeof ev))==(ssize_t)sizeof ev){
                 if(ev.type!=EV_KEY||ev.code!=KEY_F19){
