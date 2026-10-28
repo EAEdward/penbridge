@@ -144,6 +144,12 @@ static int find_pen_keyboard(char *path_out, size_t plen) {
     return found;
 }
 
+static const char *name_of(int fd) {
+    static char buf[128];
+    if (dev_name(fd, buf, sizeof buf) <= 0) return "?";
+    return buf;
+}
+
 static void emit(int fd, int type, int code, int val) {
     struct input_event ev;
     memset(&ev, 0, sizeof ev);
@@ -205,7 +211,14 @@ static int run_solo(const char *kbd_sub, const char *sty_sub, const char *name_o
     }
     closedir(d);
 
-    if (nkbd == 0) LOG("warning: no pen keyboard (KEY_F19) found");
+    if (nkbd == 0) {
+        // The pen is a Bluetooth HID device: at boot (or after a disconnect) it is simply not
+        // there yet. Running without it would grab the stylus and never see KEY_F19, so hand
+        // control back to the supervisor instead of half-starting.
+        LOG("pen keyboard not connected yet, exiting for retry");
+        for (int i = 0; i < ncl; i++) if (cl[i].src >= 0) close(cl[i].src);
+        return 5;
+    }
     if (ncl == 0) { LOG("error: no stylus matched \"%s\"", sty_sub); return 3; }
 
     for (int i = 0; i < nkbd; i++)
@@ -216,10 +229,34 @@ static int run_solo(const char *kbd_sub, const char *sty_sub, const char *name_o
     for (int i = 0; i < ncl; i++) {
         struct input_event ev;
         while (read(cl[i].src, &ev, sizeof ev) == (ssize_t)sizeof ev) {}
-        if (ioctl(cl[i].src, EVIOCGRAB, 1) < 0)
-            LOG("grab stylus failed: %s", strerror(errno));
+        if (ioctl(cl[i].src, EVIOCGRAB, 1) < 0) {
+            // A stale instance still owns the device. Never run without the grab: the system
+            // would then receive both the original and the cloned events.
+            LOG("grab stylus failed: %s, exiting for retry", strerror(errno));
+            for (int k = 0; k <= i; k++) {
+                if (cl[k].ufd >= 0) { ioctl(cl[k].ufd, UI_DEV_DESTROY); close(cl[k].ufd); cl[k].ufd = -1; }
+                ioctl(cl[k].src, EVIOCGRAB, 0);
+                close(cl[k].src);
+            }
+            for (int k = 0; k < nkbd; k++) { ioctl(kbd[k], EVIOCGRAB, 0); close(kbd[k]); }
+            return 6;
+        }
         cl[i].ufd = create_clone(cl[i].src, name_override);
-        if (cl[i].ufd < 0) ioctl(cl[i].src, EVIOCGRAB, 0);
+        if (cl[i].ufd < 0) {
+            LOG("clone failed on %s (uinput not ready?)", name_of(cl[i].src));
+            ioctl(cl[i].src, EVIOCGRAB, 0);
+        }
+    }
+    {
+        int created = 0;
+        for (int i = 0; i < ncl; i++) if (cl[i].ufd >= 0) created++;
+        if (created == 0) {
+            // /dev/uinput may not be ready this early after boot; let the supervisor retry.
+            LOG("no virtual stylus created, exiting for retry");
+            for (int i = 0; i < ncl; i++) if (cl[i].src >= 0) { ioctl(cl[i].src, EVIOCGRAB, 0); close(cl[i].src); }
+            for (int i = 0; i < nkbd; i++) { ioctl(kbd[i], EVIOCGRAB, 0); close(kbd[i]); }
+            return 4;
+        }
     }
 
     int remote = 0;
@@ -402,6 +439,11 @@ static int create_clone(int src_fd, const char *name_override) {
     struct input_id ids;
     memset(&ids, 0, sizeof ids);
     ioctl(src_fd, EVIOCGID, &ids);
+    if (name_override && *name_override) {
+        // "S Pen mode": present the clone as a Samsung EMR pen so apps that key off the
+        // input device identity (name / vendor / bus) treat it as an S Pen.
+        ids.bustype = 0x18; ids.vendor = 0x04e8; ids.product = 0x0000; ids.version = 0x0100;
+    }
 
     unsigned char evbits[(EV_MAX + 8) / 8];
     memset(evbits, 0, sizeof evbits);
