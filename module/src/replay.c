@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -54,6 +55,12 @@ static int find_pen(char *path,size_t n){
         if(ioctl(fd,EVIOCGNAME(sizeof name-1),name)<=0){close(fd);continue;}
         unsigned char kb[(KEY_MAX+8)/8]; memset(kb,0,sizeof kb);
         if(ioctl(fd,EVIOCGBIT(EV_KEY,sizeof kb),kb)<0){close(fd);continue;}
+        /* Never match our own virtual keyboard: it carries the same name and would
+           otherwise be grabbed instead of the real pen. */
+        char sp[160]; snprintf(sp,sizeof sp,"/sys/class/input/%s/device/phys",de->d_name);
+        int pf=open(sp,O_RDONLY|O_CLOEXEC); char pb[64]={0};
+        if(pf>=0){ ssize_t pn=read(pf,pb,sizeof pb-1); (void)pn; close(pf); }
+        if(strstr(pb,"penbridge-virtual")){ close(fd); continue; }
         if(strstr(name,"Focus Pen")&&test_bit(KEY_F19,kb)){
             LOG("pen keyboard: %s (%s)",name,p);
             snprintf(path,n,"%s",p); found=fd; break;
@@ -116,6 +123,23 @@ static int vkbd_present(void){
     closedir(d); return found;
 }
 
+
+/* A framework-only reboot keeps our process and the uinput node in /sys alive, but
+   InputReader comes back with an empty device table: injected keys then go nowhere.
+   The reliable signal is system_server itself. */
+static pid_t system_server_pid(void){
+    DIR *d=opendir("/proc"); if(!d) return -1;
+    struct dirent *de; pid_t found=-1;
+    while((de=readdir(d))){
+        if(de->d_name[0]<'0'||de->d_name[0]>'9') continue;
+        char p[64]; snprintf(p,sizeof p,"/proc/%s/comm",de->d_name);
+        int f=open(p,O_RDONLY|O_CLOEXEC); if(f<0) continue;
+        char b[64]={0}; ssize_t n=read(f,b,sizeof b-1); close(f);
+        if(n>0&&strstr(b,"system_server")){ found=(pid_t)atoi(de->d_name); break; }
+    }
+    closedir(d); return found;
+}
+
 int main(void){
     /* Single instance: a framework soft-reboot can leave an old supervisor alive while a new
        one starts. flock makes the loser exit immediately instead of fighting over the device. */
@@ -125,6 +149,7 @@ int main(void){
     signal(SIGINT,onsig); signal(SIGTERM,onsig);
     setvbuf(stdout,NULL,_IOLBF,0);
     int ufd=-1, pressed=0, restored=1;
+    pid_t ss=system_server_pid();
     while(!stop){
         char path[128];
         int src=find_pen(path,sizeof path);
@@ -144,11 +169,18 @@ int main(void){
             int pr=poll(&p,1,500);
             if(pr<0&&errno==EINTR) continue;
             if(pr<=0){
-                if(++tick%10==0&&!vkbd_present()){
-                    LOG("virtual keyboard disappeared, rebuilding");
-                    ioctl(ufd,UI_DEV_DESTROY); close(ufd);
-                    ufd=make_keyboard(src);
-                    if(ufd<0){ LOG("rebuild failed, exiting"); break; }
+                if(++tick%10==0){
+                    pid_t now=system_server_pid();
+                    int rebooted=(now>0&&ss>0&&now!=ss);
+                    ss=now;
+                    if(rebooted||!vkbd_present()){
+                        LOG("%s", rebooted?"framework restarted, rebuilding keyboard"
+                                          :"virtual keyboard gone, rebuilding");
+                        ioctl(ufd,UI_DEV_DESTROY); close(ufd);
+                        ufd=make_keyboard(src);
+                        if(ufd<0){ LOG("rebuild failed, exiting"); break; }
+                        ioctl(src,EVIOCGRAB,0); ioctl(src,EVIOCGRAB,1);
+                    }
                 }
                 continue;
             }

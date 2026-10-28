@@ -11,9 +11,11 @@ FLAG=/data/adb/penbridge.disabled
   exec </dev/null
   while true; do
     [ -f "$FLAG" ] && break
-    echo "--- $(date) start"
-    "$MODDIR/bin/penbridge"
-    [ -f "$FLAG" ] && break
+    if [ -z "$(pidof penbridge)" ]; then
+      echo "--- $(date) start"
+      "$MODDIR/bin/penbridge"
+      [ -f "$FLAG" ] && break
+    fi
     sleep 5
   done
 ) >>"$LOG" 2>&1 &
