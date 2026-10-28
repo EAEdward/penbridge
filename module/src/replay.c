@@ -104,8 +104,14 @@ int main(void){
         char path[128];
         int src=find_pen(path,sizeof path);
         if(src<0){ if(!stop) sleep(2); continue; }
-        if(ioctl(src,EVIOCGRAB,1)<0) LOG("grab failed: %s",strerror(errno));
-        else LOG("grabbed %s",path);
+        if(ioctl(src,EVIOCGRAB,1)<0){
+            /* Another instance owns the device: never run without the grab, it would
+               double-deliver every key. Hand back to the supervisor. */
+            LOG("grab failed: %s, exiting",strerror(errno));
+            close(src);
+            return 1;
+        }
+        LOG("grabbed %s",path);
         if(ufd<0){ ufd=make_keyboard(src); if(ufd<0){ ioctl(src,EVIOCGRAB,0); close(src); return 1; } }
         struct pollfd p={.fd=src,.events=POLLIN};
         while(!stop){
