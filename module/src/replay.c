@@ -39,6 +39,10 @@ struct uinput_setup { struct input_id id; char name[80]; uint32_t ff; };
 
 #define LOG(...) do{printf("[penbridge] " __VA_ARGS__);printf("\n");fflush(stdout);}while(0)
 
+/* Synthetic key-press width, runtime-tunable (see TAP_MS_FILE). */
+#define TAP_MS_DEFAULT 45
+static int tap_ms = TAP_MS_DEFAULT;
+
 static volatile sig_atomic_t stop;
 static void onsig(int s){ (void)s; stop=1; }
 
@@ -88,7 +92,7 @@ static int make_keyboard(int src){
     us.id.bustype=0x0005; us.id.vendor=0x0022; us.id.product=0x5081; us.id.version=0x0111;
     if(ioctl(fd,UI_DEV_SETUP,&us)<0){perror("UI_DEV_SETUP");close(fd);return -1;}
     if(ioctl(fd,UI_DEV_CREATE)<0){perror("UI_DEV_CREATE");close(fd);return -1;}
-    LOG("virtual keyboard ready: \"%s\" bus=0005 vid=0022 pid=5081",us.name);
+    LOG("virtual keyboard ready: \"%s\" bus=0005 vid=0022 pid=5081, tap %d ms",us.name,tap_ms);
     return fd;
 }
 
@@ -100,10 +104,27 @@ static void emit(int fd,int code,int val){
     if(write(fd,&e,sizeof e)<0) return;
 }
 
+/* How long the synthetic key stays down. Too short and the framework/app can
+   swallow it as a stray glitch; too long and it risks reading as a long press
+   (500 ms) or tripping the kernel's key autorepeat. 45 ms sits safely between. */
+#define TAP_MS_FILE "/data/adb/penbridge.tap_ms"
+
+/* The width can be dialled in without a rebuild:
+   echo 60 > /data/adb/penbridge.tap_ms   then restart the daemon. */
 static void tap(int ufd){
     emit(ufd,KEY_F19,1);
-    usleep(20000);
+    usleep((useconds_t)tap_ms*1000);
     emit(ufd,KEY_F19,0);
+}
+
+static void load_tap_ms(void){
+    int f=open(TAP_MS_FILE,O_RDONLY|O_CLOEXEC);
+    if(f<0) return;
+    char b[32]={0}; ssize_t n=read(f,b,sizeof b-1); close(f);
+    if(n<=0) return;
+    int v=atoi(b);
+    if(v<5||v>200) return;
+    tap_ms=v;
 }
 
 
@@ -147,6 +168,7 @@ int main(void){
     if(lock>=0 && flock(lock,LOCK_EX|LOCK_NB)<0){ fprintf(stderr,"[penbridge] already running\n"); return 0; }
 
     signal(SIGINT,onsig); signal(SIGTERM,onsig);
+    load_tap_ms();
     setvbuf(stdout,NULL,_IOLBF,0);
     int ufd=-1, pressed=0, restored=1;
     pid_t ss=system_server_pid();

@@ -22,8 +22,18 @@ Xiaomi Focus Pen Pro Keyboard (evdev)
 
 只抢占「轻捏」这一个键，其余按键（笔身双击、上下滑）原样转发，所以官方功能不受影响。
 
-一次「点按」= 按下 20 ms 再抬起：系统的按键去抖与长按判定都不会被触发，
-app 收到的就是一次干净的一下。
+一次「点按」= 按下 45 ms 再抬起（`TAP_MS_DEFAULT`）：短于按键去抖/长按判定的任何门槛，
+又长到不会被 framework 当成误触吞掉，app 收到的就是一次干净的一下。
+
+嫌不够松可以在设备上直接调，不用重新编译：
+
+```sh
+su -c 'echo 60 > /data/adb/penbridge.tap_ms'   # 5–200 ms，默认 45
+su -c 'sh /data/adb/modules/penbridge/action.sh'  # 关
+su -c 'sh /data/adb/modules/penbridge/action.sh'  # 再开，读新的宽度
+```
+
+日志里 `virtual keyboard ready: ... , tap 60 ms` 就是当前生效值。
 
 ## 特性
 
