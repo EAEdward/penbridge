@@ -11,7 +11,8 @@ for f in module.prop service.sh action.sh; do
   $ADB push "$HERE/module/$f" /data/local/tmp/penbridge-stage/$f >/dev/null
 done
 $ADB shell "su -c '
-  pkill -f /data/adb/modules/penbridge/bin/penbridge || true
+  pkill -9 -x penbridge || true
+  rm -f /data/adb/penbridge.lock
   mkdir -p /data/adb/modules/penbridge/bin
   cp -f /data/local/tmp/penbridge-stage/bin/penbridge /data/adb/modules/penbridge/bin/
   cp -f /data/local/tmp/penbridge-stage/module.prop /data/local/tmp/penbridge-stage/service.sh         /data/local/tmp/penbridge-stage/action.sh /data/adb/modules/penbridge/

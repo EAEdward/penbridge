@@ -157,9 +157,10 @@ int main(void){
         if(ioctl(src,EVIOCGRAB,1)<0){
             /* Another instance owns the device: never run without the grab, it would
                double-deliver every key. Hand back to the supervisor. */
-            LOG("grab failed: %s, exiting",strerror(errno));
+            LOG("grab failed: %s, retrying",strerror(errno));
             close(src);
-            return 1;
+            sleep(2);
+            continue;
         }
         LOG("grabbed %s",path);
         if(ufd<0){ ufd=make_keyboard(src); if(ufd<0){ ioctl(src,EVIOCGRAB,0); close(src); return 1; } }
@@ -192,8 +193,11 @@ int main(void){
                 }
                 if(ev.value==2) continue;
                 if(ev.value==1){
-                    if(pressed){ tap(ufd); restored=1; }
-                    pressed=1; restored=0; tap(ufd); LOG("down -> toggle");
+                    /* A repeat DOWN while we are already pressed means the press is still
+                       in progress (or its UP was lost). The tool is already toggled, so
+                       stay silent: tapping twice here would look like a double pinch and
+                       the framework would treat it as a different gesture. */
+                    if(!pressed){ pressed=1; restored=0; tap(ufd); LOG("down -> toggle"); }
                 } else if(ev.value==0 && pressed){
                     pressed=0;
                     if(!restored){ tap(ufd); restored=1; LOG("up -> toggle back"); }

@@ -1,6 +1,6 @@
 id=penbridge
 name=PenBridge
-version=v1.3
-versionCode=13
+version=v1.4
+versionCode=14
 author=eaedward
-description=把小米焦点笔的「轻捏」从点按改成「按住切橡皮、松手切回画笔」：只劫持 KEY_F19，其余按键原样透传；37KB 静态二进制，空闲零 CPU。
+description=把小米焦点笔的「轻捏」从点按改成「按住切橡皮、松手切回画笔」：只劫持 KEY_F19，其余按键（双击/上下滑）原样透传；单进程常驻，断连自愈，空闲零 CPU。
