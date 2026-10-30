@@ -22,18 +22,13 @@ Xiaomi Focus Pen Pro Keyboard (evdev)
 
 只抢占「轻捏」这一个键，其余按键（笔身双击、上下滑）原样转发，所以官方功能不受影响。
 
-一次「点按」= 按下 45 ms 再抬起（`TAP_MS_DEFAULT`）：短于按键去抖/长按判定的任何门槛，
-又长到不会被 framework 当成误触吞掉，app 收到的就是一次干净的一下。
+**本模块不定义「捏多用力算捏」**。捏合的力度与灵敏度在笔的固件和系统设置里
+（`settings get system stylus_pinch_pressure_adjust`、`stylus_pinch_status`），
+我们只做一件事：捏合按下 → 一次普通按键，松开 → 一次普通按键，其余交给系统。
 
-嫌不够松可以在设备上直接调，不用重新编译：
-
-```sh
-su -c 'echo 60 > /data/adb/penbridge.tap_ms'   # 5–200 ms，默认 45
-su -c 'sh /data/adb/modules/penbridge/action.sh'  # 关
-su -c 'sh /data/adb/modules/penbridge/action.sh'  # 再开，读新的宽度
-```
-
-日志里 `virtual keyboard ready: ... , tap 60 ms` 就是当前生效值。
+唯一强制的是**两次按键不能挤在一起**：间隔小于 300 ms，framework 会把它们并成一个
+双击手势，第二次就丢了——「短促捏一下切过去回不来」正是这么来的。现在强制 320 ms 间隔，
+长按（真实使用）毫无影响，只有极短的捏合会晚 0.3 秒再切回。
 
 ## 特性
 

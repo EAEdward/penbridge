@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #define EV_SYN 0x00
@@ -38,10 +39,6 @@ struct uinput_setup { struct input_id id; char name[80]; uint32_t ff; };
 #define UI_SET_PHYS _IOW('U', 108, char *)
 
 #define LOG(...) do{printf("[penbridge] " __VA_ARGS__);printf("\n");fflush(stdout);}while(0)
-
-/* Synthetic key-press width, runtime-tunable (see TAP_MS_FILE). */
-#define TAP_MS_DEFAULT 45
-static int tap_ms = TAP_MS_DEFAULT;
 
 static volatile sig_atomic_t stop;
 static void onsig(int s){ (void)s; stop=1; }
@@ -92,7 +89,7 @@ static int make_keyboard(int src){
     us.id.bustype=0x0005; us.id.vendor=0x0022; us.id.product=0x5081; us.id.version=0x0111;
     if(ioctl(fd,UI_DEV_SETUP,&us)<0){perror("UI_DEV_SETUP");close(fd);return -1;}
     if(ioctl(fd,UI_DEV_CREATE)<0){perror("UI_DEV_CREATE");close(fd);return -1;}
-    LOG("virtual keyboard ready: \"%s\" bus=0005 vid=0022 pid=5081, tap %d ms",us.name,tap_ms);
+    LOG("virtual keyboard ready: \"%s\" bus=0005 vid=0022 pid=5081",us.name);
     return fd;
 }
 
@@ -104,27 +101,29 @@ static void emit(int fd,int code,int val){
     if(write(fd,&e,sizeof e)<0) return;
 }
 
-/* How long the synthetic key stays down. Too short and the framework/app can
-   swallow it as a stray glitch; too long and it risks reading as a long press
-   (500 ms) or tripping the kernel's key autorepeat. 45 ms sits safely between. */
-#define TAP_MS_FILE "/data/adb/penbridge.tap_ms"
+/* No threshold of our own: one squeeze edge = one ordinary key press, and the
+   framework/app decides what that press means. The only thing we enforce is
+   that two synthetic presses are far enough apart to stay distinct — below the
+   ~300 ms double-tap window an app can merge them into one gesture, which is
+   exactly how a quick squeeze used to end up stuck in eraser. */
+#define TAP_MS 50         /* how long a normal key press lasts */
+#define MIN_TAP_GAP_MS 320 /* longer than the framework's double-tap window */
 
-/* The width can be dialled in without a rebuild:
-   echo 60 > /data/adb/penbridge.tap_ms   then restart the daemon. */
-static void tap(int ufd){
-    emit(ufd,KEY_F19,1);
-    usleep((useconds_t)tap_ms*1000);
-    emit(ufd,KEY_F19,0);
+static long long now_ms(void){
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+    return (long long)ts.tv_sec*1000 + ts.tv_nsec/1000000;
 }
 
-static void load_tap_ms(void){
-    int f=open(TAP_MS_FILE,O_RDONLY|O_CLOEXEC);
-    if(f<0) return;
-    char b[32]={0}; ssize_t n=read(f,b,sizeof b-1); close(f);
-    if(n<=0) return;
-    int v=atoi(b);
-    if(v<5||v>200) return;
-    tap_ms=v;
+static long long last_tap_end;
+static long long down_ms;
+
+static void tap(int ufd){
+    long long wait = last_tap_end + MIN_TAP_GAP_MS - now_ms();
+    if(wait > 0) usleep((useconds_t)wait*1000);
+    emit(ufd,KEY_F19,1);
+    usleep(TAP_MS*1000);
+    emit(ufd,KEY_F19,0);
+    last_tap_end = now_ms();
 }
 
 
@@ -168,7 +167,6 @@ int main(void){
     if(lock>=0 && flock(lock,LOCK_EX|LOCK_NB)<0){ fprintf(stderr,"[penbridge] already running\n"); return 0; }
 
     signal(SIGINT,onsig); signal(SIGTERM,onsig);
-    load_tap_ms();
     setvbuf(stdout,NULL,_IOLBF,0);
     int ufd=-1, pressed=0, restored=1;
     pid_t ss=system_server_pid();
@@ -219,10 +217,14 @@ int main(void){
                        in progress (or its UP was lost). The tool is already toggled, so
                        stay silent: tapping twice here would look like a double pinch and
                        the framework would treat it as a different gesture. */
-                    if(!pressed){ pressed=1; restored=0; tap(ufd); LOG("down -> toggle"); }
+                    if(!pressed){ pressed=1; restored=0; tap(ufd); down_ms=now_ms(); LOG("down -> eraser"); }
                 } else if(ev.value==0 && pressed){
                     pressed=0;
-                    if(!restored){ tap(ufd); restored=1; LOG("up -> toggle back"); }
+                    if(!restored){
+                        long long held=now_ms()-down_ms;
+                        tap(ufd); restored=1;
+                        LOG("up -> pen (squeeze %lld ms)",held);
+                    }
                 }
             }
             if(n<0&&errno!=EAGAIN&&errno!=EINTR) break;

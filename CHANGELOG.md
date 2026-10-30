@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## v1.6 — 2026-10-30
+
+* 删掉 `/data/adb/penbridge.tap_ms` 与 `TAP_MS_DEFAULT`：本模块不再定义「按多重/按多久」。
+  捏合力度归笔固件 + 系统设置（`stylus_pinch_pressure_adjust` / `stylus_pinch_status`）。
+* 修「短促捏一下切到橡皮后不回来」：两次合成按键间隔强制 ≥ 320 ms，
+  不再落进 framework 的 300 ms 双击判定窗口（那是第二次按键被并掉、只有一次生效的真因）。
+* 日志改成 `down -> eraser` / `up -> pen (squeeze N ms)`，能直接量出每次捏合的实际时长。
+
 ## v1.5 — 2026-10-28
 
 * 合成点按从 20 ms 拉到 45 ms（`TAP_MS`）：更不容易被 framework / app 当成误触吞掉，
