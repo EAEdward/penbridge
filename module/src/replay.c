@@ -108,6 +108,10 @@ static void emit(int fd,int code,int val){
    exactly how a quick squeeze used to end up stuck in eraser. */
 #define TAP_MS 50      /* how long a normal key press lasts */
 #define MIN_TAP_GAP_MS 80 /* keep the two presses from merging into one repeat */
+/* A squeeze shorter than this does nothing at all: no tool change, no flicker.
+   Only a real "hold" reaches the app, which is what keeps accidental brushes
+   of the pen body from registering. */
+#define MIN_HOLD_MS 120
 
 static long long now_ms(void){
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
@@ -116,6 +120,8 @@ static long long now_ms(void){
 
 static long long last_tap_end;
 static long long down_ms;
+static long long press_start;
+static int pending;
 
 static void tap(int ufd){
     long long wait = last_tap_end + MIN_TAP_GAP_MS - now_ms();
@@ -186,10 +192,22 @@ int main(void){
         if(ufd<0){ ufd=make_keyboard(src); if(ufd<0){ ioctl(src,EVIOCGRAB,0); close(src); return 1; } }
         struct pollfd p={.fd=src,.events=POLLIN};
         int tick=0;
+        pressed=0; pending=0; restored=1;
         while(!stop){
-            int pr=poll(&p,1,500);
+            int timeout=500;
+            if(pending){
+                long long left=press_start+MIN_HOLD_MS-now_ms();
+                timeout=left<0?0:(left<500?(int)left:500);
+            }
+            int pr=poll(&p,1,timeout);
             if(pr<0&&errno==EINTR) continue;
             if(pr<=0){
+                /* The squeeze has lasted long enough to count: hand the app one press. */
+                if(pending&&now_ms()-press_start>=MIN_HOLD_MS){
+                    pending=0; pressed=1; restored=0; down_ms=press_start;
+                    tap(ufd);
+                    LOG("hold -> eraser");
+                }
                 if(++tick%10==0){
                     pid_t now=system_server_pid();
                     int rebooted=(now>0&&ss>0&&now!=ss);
@@ -213,17 +231,19 @@ int main(void){
                 }
                 if(ev.value==2) continue;
                 if(ev.value==1){
-                    /* A repeat DOWN while we are already pressed means the press is still
-                       in progress (or its UP was lost). The tool is already toggled, so
-                       stay silent: tapping twice here would look like a double pinch and
-                       the framework would treat it as a different gesture. */
-                    if(!pressed){ pressed=1; restored=0; tap(ufd); down_ms=now_ms(); LOG("down -> eraser"); }
-                } else if(ev.value==0 && pressed){
-                    pressed=0;
-                    if(!restored){
-                        long long held=now_ms()-down_ms;
-                        tap(ufd); restored=1;
-                        LOG("up -> pen (squeeze %lld ms)",held);
+                    /* Start the stopwatch only: nothing is injected until the squeeze has
+                       proved itself by lasting MIN_HOLD_MS. Repeat DOWNs are ignored. */
+                    if(!pressed&&!pending){ pending=1; press_start=now_ms(); }
+                } else if(ev.value==0){
+                    if(pressed){
+                        pressed=0;
+                        if(!restored){
+                            LOG("up -> pen (held %lld ms)",now_ms()-down_ms);
+                            tap(ufd); restored=1;
+                        }
+                    } else if(pending){
+                        pending=0;
+                        LOG("ignored quick squeeze (%lld ms)",now_ms()-press_start);
                     }
                 }
             }
