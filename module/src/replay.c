@@ -106,8 +106,8 @@ static void emit(int fd,int code,int val){
    that two synthetic presses are far enough apart to stay distinct — below the
    ~300 ms double-tap window an app can merge them into one gesture, which is
    exactly how a quick squeeze used to end up stuck in eraser. */
-#define TAP_MS 50         /* how long a normal key press lasts */
-#define MIN_TAP_GAP_MS 320 /* longer than the framework's double-tap window */
+#define TAP_MS 50      /* how long a normal key press lasts */
+#define MIN_TAP_GAP_MS 80 /* keep the two presses from merging into one repeat */
 
 static long long now_ms(void){
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
