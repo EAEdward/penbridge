@@ -1,260 +1,128 @@
-// penbridge-replay: turn the pen's "pinch once" into "press = toggle, release = toggle back"
-// by replaying a synthetic KEY_F19 tap pair on a virtual keyboard.
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
-#include <stdlib.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/file.h>
 #include <sys/ioctl.h>
-#include <time.h>
 #include <unistd.h>
 
-#define EV_SYN 0x00
-#define EV_KEY 0x01
-#define EV_MSC 0x04
-#define SYN_REPORT 0
-#define KEY_F19 189
-#define EV_MAX 0x1f
-#define KEY_MAX 0x2ff
+#include "penbridge.h"
 
-struct pb_timeval { long tv_sec; long tv_usec; };
-struct input_event { struct pb_timeval time; uint16_t type; uint16_t code; int32_t value; };
-struct input_id { uint16_t bustype, vendor, product, version; };
-struct uinput_setup { struct input_id id; char name[80]; uint32_t ff; };
+struct pb_input_id { uint16_t bustype, vendor, product, version; };
+struct pb_uinput_setup { struct pb_input_id id; char name[80]; uint32_t ff; };
 
-#define EVIOCGNAME(len) _IOC(_IOC_READ, 'E', 0x06, len)
-#define EVIOCGBIT(ev, len) _IOC(_IOC_READ, 'E', 0x20 + (ev), len)
-#define EVIOCGRAB _IOW('E', 0x90, int)
 #define UI_DEV_CREATE _IO('U', 1)
 #define UI_DEV_DESTROY _IO('U', 2)
-#define UI_DEV_SETUP _IOW('U', 3, struct uinput_setup)
+#define UI_DEV_SETUP _IOW('U', 3, struct pb_uinput_setup)
 #define UI_SET_EVBIT _IOW('U', 100, int)
 #define UI_SET_KEYBIT _IOW('U', 101, int)
 #define UI_SET_PHYS _IOW('U', 108, char *)
+#define EVIOCGBIT(ev, len) _IOC(_IOC_READ, 'E', 0x20 + (ev), len)
 
-#define LOG(...) do{printf("[penbridge] " __VA_ARGS__);printf("\n");fflush(stdout);}while(0)
-
-static volatile sig_atomic_t stop;
-static void onsig(int s){ (void)s; stop=1; }
-
-static int test_bit(int b,const unsigned char*p){return (p[b>>3]>>(b&7))&1;}
-
-static int find_pen(char *path,size_t n){
-    DIR *d=opendir("/dev/input"); if(!d) return -1;
-    struct dirent *de; int found=-1;
-    while((de=readdir(d))){
-        if(strncmp(de->d_name,"event",5)) continue;
-        char p[128]; snprintf(p,sizeof p,"/dev/input/%s",de->d_name);
-        int fd=open(p,O_RDONLY|O_NONBLOCK|O_CLOEXEC); if(fd<0) continue;
-        char name[128]={0};
-        if(ioctl(fd,EVIOCGNAME(sizeof name-1),name)<=0){close(fd);continue;}
-        unsigned char kb[(KEY_MAX+8)/8]; memset(kb,0,sizeof kb);
-        if(ioctl(fd,EVIOCGBIT(EV_KEY,sizeof kb),kb)<0){close(fd);continue;}
-        /* Never match our own virtual keyboard: it carries the same name and would
-           otherwise be grabbed instead of the real pen. */
-        char sp[160]; snprintf(sp,sizeof sp,"/sys/class/input/%s/device/phys",de->d_name);
-        int pf=open(sp,O_RDONLY|O_CLOEXEC); char pb[64]={0};
-        if(pf>=0){ ssize_t pn=read(pf,pb,sizeof pb-1); (void)pn; close(pf); }
-        if(strstr(pb,"penbridge-virtual")){ close(fd); continue; }
-        if(strstr(name,"Focus Pen")&&test_bit(KEY_F19,kb)){
-            LOG("pen keyboard: %s (%s)",name,p);
-            snprintf(path,n,"%s",p); found=fd; break;
-        }
-        close(fd);
-    }
-    closedir(d); return found;
+static int has_bit(const unsigned char *bits, int b)
+{
+    return (bits[b >> 3] >> (b & 7)) & 1;
 }
 
-static int make_keyboard(int src){
-    int fd=open("/dev/uinput",O_WRONLY|O_NONBLOCK|O_CLOEXEC);
-    if(fd<0){perror("uinput");return -1;}
-    ioctl(fd,UI_SET_EVBIT,EV_KEY);
-    ioctl(fd,UI_SET_EVBIT,EV_SYN);
-    ioctl(fd,UI_SET_EVBIT,EV_MSC);
-    // Mirror every key the real pen has: F19 is hijacked, everything else (body double-tap,
-    // slides, shortcuts) must keep reaching the system untouched.
-    unsigned char kb[(KEY_MAX+8)/8]; memset(kb,0,sizeof kb);
-    if(ioctl(src,EVIOCGBIT(EV_KEY,sizeof kb),kb)>=0)
-        for(int k=0;k<=KEY_MAX;k++) if(test_bit(k,kb)) ioctl(fd,UI_SET_KEYBIT,k);
-    ioctl(fd,UI_SET_KEYBIT,KEY_F19);
-    struct uinput_setup us; memset(&us,0,sizeof us);
-    snprintf(us.name,sizeof us.name,"Xiaomi Focus Pen Pro Keyboard");
-    ioctl(fd,UI_SET_PHYS,"penbridge-virtual");
-    us.id.bustype=0x0005; us.id.vendor=0x0022; us.id.product=0x5081; us.id.version=0x0111;
-    if(ioctl(fd,UI_DEV_SETUP,&us)<0){perror("UI_DEV_SETUP");close(fd);return -1;}
-    if(ioctl(fd,UI_DEV_CREATE)<0){perror("UI_DEV_CREATE");close(fd);return -1;}
-    LOG("virtual keyboard ready: \"%s\" bus=0005 vid=0022 pid=5081",us.name);
+static int write_event(int fd, uint16_t type, uint16_t code, int32_t value)
+{
+    struct pb_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.type = type;
+    ev.code = code;
+    ev.value = value;
+    return write(fd, &ev, sizeof ev) == (ssize_t)sizeof ev ? 0 : -1;
+}
+
+int replay_forward(int fd, const struct pb_event *ev)
+{
+    return write(fd, ev, sizeof *ev) == (ssize_t)sizeof *ev ? 0 : -1;
+}
+
+/* One edge in, one complete press pair out. DOWN and UP are written in a single
+ * batch with no interval: the app sees an ordinary instantaneous key press, and
+ * no synthetic key is ever left held (see docs/DESIGN.md, release safeguard). */
+int replay_pair(int fd, unsigned code)
+{
+    struct pb_event batch[4];
+    memset(batch, 0, sizeof batch);
+    batch[0].type = PB_EV_KEY; batch[0].code = (uint16_t)code; batch[0].value = 1;
+    batch[1].type = PB_EV_SYN; batch[1].code = PB_SYN_REPORT;
+    batch[2].type = PB_EV_KEY; batch[2].code = (uint16_t)code; batch[2].value = 0;
+    batch[3].type = PB_EV_SYN; batch[3].code = PB_SYN_REPORT;
+    return write(fd, batch, sizeof batch) == (ssize_t)sizeof batch ? 0 : -1;
+}
+
+/* Mirror the pen's key set so the replay device is indistinguishable from the
+ * interface it replaces; F19 itself is included for the pairs above. */
+int replay_open(int src_fd)
+{
+    int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        pb_log("uinput unavailable: %s", strerror(errno));
+        return -1;
+    }
+    ioctl(fd, UI_SET_EVBIT, PB_EV_KEY);
+    ioctl(fd, UI_SET_EVBIT, PB_EV_SYN);
+
+    unsigned char keys[(PB_KEY_MAX + 8) / 8];
+    memset(keys, 0, sizeof keys);
+    if (ioctl(src_fd, EVIOCGBIT(PB_EV_KEY, sizeof keys), keys) >= 0)
+        for (int k = 0; k <= PB_KEY_MAX; k++)
+            if (has_bit(keys, k))
+                ioctl(fd, UI_SET_KEYBIT, k);
+    ioctl(fd, UI_SET_KEYBIT, PB_KEY_F19);
+
+    struct pb_uinput_setup us;
+    memset(&us, 0, sizeof us);
+    snprintf(us.name, sizeof us.name, "Xiaomi Focus Pen Pro Keyboard");
+    ioctl(fd, UI_SET_PHYS, "penbridge-virtual");
+    us.id.bustype = 0x0005;
+    us.id.vendor = 0x0022;
+    us.id.product = 0x5081;
+    us.id.version = 0x0111;
+    if (ioctl(fd, UI_DEV_SETUP, &us) < 0 || ioctl(fd, UI_DEV_CREATE) < 0) {
+        pb_log("virtual keyboard setup failed: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    pb_log("virtual keyboard ready: \"%s\" bus=0005 vid=0022 pid=5081", us.name);
     return fd;
 }
 
-static void emit(int fd,int code,int val){
-    struct input_event e; memset(&e,0,sizeof e);
-    e.type=EV_KEY; e.code=(uint16_t)code; e.value=val;
-    if(write(fd,&e,sizeof e)<0) return;
-    memset(&e,0,sizeof e); e.type=EV_SYN; e.code=SYN_REPORT;
-    if(write(fd,&e,sizeof e)<0) return;
+void replay_close(int fd)
+{
+    if (fd < 0)
+        return;
+    ioctl(fd, UI_DEV_DESTROY);
+    close(fd);
 }
 
-/* No threshold of our own: one squeeze edge = one ordinary key press, and the
-   framework/app decides what that press means. The only thing we enforce is
-   that two synthetic presses are far enough apart to stay distinct — below the
-   ~300 ms double-tap window an app can merge them into one gesture, which is
-   exactly how a quick squeeze used to end up stuck in eraser. */
-#define TAP_MS 50      /* how long a normal key press lasts */
-#define MIN_TAP_GAP_MS 80 /* keep the two presses from merging into one repeat */
-/* A squeeze shorter than this does nothing at all: no tool change, no flicker.
-   Only a real "hold" reaches the app, which is what keeps accidental brushes
-   of the pen body from registering. */
-#define MIN_HOLD_MS 120
-
-static long long now_ms(void){
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
-    return (long long)ts.tv_sec*1000 + ts.tv_nsec/1000000;
-}
-
-static long long last_tap_end;
-static long long down_ms;
-static long long press_start;
-static int pending;
-
-static void tap(int ufd){
-    long long wait = last_tap_end + MIN_TAP_GAP_MS - now_ms();
-    if(wait > 0) usleep((useconds_t)wait*1000);
-    emit(ufd,KEY_F19,1);
-    usleep(TAP_MS*1000);
-    emit(ufd,KEY_F19,0);
-    last_tap_end = now_ms();
-}
-
-
-/* The framework may restart (soft reboot) without killing us: the uinput device then
-   disappears from /sys/class/input and every injected key goes nowhere. Detect that by
-   the unique phys string we registered and rebuild the device. */
-static int vkbd_present(void){
-    DIR *d=opendir("/sys/class/input"); if(!d) return 1;
-    struct dirent *de; int found=0;
-    while((de=readdir(d))){
-        if(strncmp(de->d_name,"event",5)) continue;
-        char p[160]; snprintf(p,sizeof p,"/sys/class/input/%s/device/phys",de->d_name);
-        int f=open(p,O_RDONLY|O_CLOEXEC); if(f<0) continue;
-        char buf[128]={0}; ssize_t n=read(f,buf,sizeof buf-1); close(f);
-        if(n>0&&strstr(buf,"penbridge-virtual")){found=1;break;}
-    }
-    closedir(d); return found;
-}
-
-
-/* A framework-only reboot keeps our process and the uinput node in /sys alive, but
-   InputReader comes back with an empty device table: injected keys then go nowhere.
-   The reliable signal is system_server itself. */
-static pid_t system_server_pid(void){
-    DIR *d=opendir("/proc"); if(!d) return -1;
-    struct dirent *de; pid_t found=-1;
-    while((de=readdir(d))){
-        if(de->d_name[0]<'0'||de->d_name[0]>'9') continue;
-        char p[64]; snprintf(p,sizeof p,"/proc/%s/comm",de->d_name);
-        int f=open(p,O_RDONLY|O_CLOEXEC); if(f<0) continue;
-        char b[64]={0}; ssize_t n=read(f,b,sizeof b-1); close(f);
-        if(n>0&&strstr(b,"system_server")){ found=(pid_t)atoi(de->d_name); break; }
-    }
-    closedir(d); return found;
-}
-
-int main(void){
-    /* Single instance: a framework soft-reboot can leave an old supervisor alive while a new
-       one starts. flock makes the loser exit immediately instead of fighting over the device. */
-    int lock=open("/data/adb/penbridge.lock",O_RDWR|O_CREAT|O_CLOEXEC,0600);
-    if(lock>=0 && flock(lock,LOCK_EX|LOCK_NB)<0){ fprintf(stderr,"[penbridge] already running\n"); return 0; }
-
-    signal(SIGINT,onsig); signal(SIGTERM,onsig);
-    setvbuf(stdout,NULL,_IOLBF,0);
-    int ufd=-1, pressed=0, restored=1;
-    pid_t ss=system_server_pid();
-    while(!stop){
-        char path[128];
-        int src=find_pen(path,sizeof path);
-        if(src<0){ if(!stop) sleep(2); continue; }
-        if(ioctl(src,EVIOCGRAB,1)<0){
-            /* Another instance owns the device: never run without the grab, it would
-               double-deliver every key. Hand back to the supervisor. */
-            LOG("grab failed: %s, retrying",strerror(errno));
-            close(src);
-            sleep(2);
+/* A framework-only restart keeps our process alive but drops the device from
+ * InputReader, so liveness is judged by the registered phys string. */
+int replay_present(void)
+{
+    DIR *d = opendir("/sys/class/input");
+    if (!d)
+        return 1;
+    struct dirent *de;
+    int found = 0;
+    while ((de = readdir(d)) != NULL) {
+        if (strncmp(de->d_name, "event", 5) != 0)
             continue;
+        char p[160], buf[128] = {0};
+        snprintf(p, sizeof p, "/sys/class/input/%s/device/phys", de->d_name);
+        int f = open(p, O_RDONLY | O_CLOEXEC);
+        if (f < 0)
+            continue;
+        ssize_t n = read(f, buf, sizeof buf - 1);
+        close(f);
+        if (n > 0 && strstr(buf, "penbridge-virtual")) {
+            found = 1;
+            break;
         }
-        LOG("grabbed %s",path);
-        if(ufd<0){ ufd=make_keyboard(src); if(ufd<0){ ioctl(src,EVIOCGRAB,0); close(src); return 1; } }
-        struct pollfd p={.fd=src,.events=POLLIN};
-        int tick=0;
-        pressed=0; pending=0; restored=1;
-        while(!stop){
-            int timeout=500;
-            if(pending){
-                long long left=press_start+MIN_HOLD_MS-now_ms();
-                timeout=left<0?0:(left<500?(int)left:500);
-            }
-            int pr=poll(&p,1,timeout);
-            if(pr<0&&errno==EINTR) continue;
-            if(pr<=0){
-                /* The squeeze has lasted long enough to count: hand the app one press. */
-                if(pending&&now_ms()-press_start>=MIN_HOLD_MS){
-                    pending=0; pressed=1; restored=0; down_ms=press_start;
-                    tap(ufd);
-                    LOG("hold -> eraser");
-                }
-                if(++tick%10==0){
-                    pid_t now=system_server_pid();
-                    int rebooted=(now>0&&ss>0&&now!=ss);
-                    ss=now;
-                    if(rebooted||!vkbd_present()){
-                        LOG("%s", rebooted?"framework restarted, rebuilding keyboard"
-                                          :"virtual keyboard gone, rebuilding");
-                        ioctl(ufd,UI_DEV_DESTROY); close(ufd);
-                        ufd=make_keyboard(src);
-                        if(ufd<0){ LOG("rebuild failed, exiting"); break; }
-                        ioctl(src,EVIOCGRAB,0); ioctl(src,EVIOCGRAB,1);
-                    }
-                }
-                continue;
-            }
-            struct input_event ev; ssize_t n;
-            while((n=read(src,&ev,sizeof ev))==(ssize_t)sizeof ev){
-                if(ev.type!=EV_KEY||ev.code!=KEY_F19){
-                    if(write(ufd,&ev,sizeof ev)<0) goto lost;
-                    continue;
-                }
-                if(ev.value==2) continue;
-                if(ev.value==1){
-                    /* Start the stopwatch only: nothing is injected until the squeeze has
-                       proved itself by lasting MIN_HOLD_MS. Repeat DOWNs are ignored. */
-                    if(!pressed&&!pending){ pending=1; press_start=now_ms(); }
-                } else if(ev.value==0){
-                    if(pressed){
-                        pressed=0;
-                        if(!restored){
-                            LOG("up -> pen (held %lld ms)",now_ms()-down_ms);
-                            tap(ufd); restored=1;
-                        }
-                    } else if(pending){
-                        pending=0;
-                        LOG("ignored quick squeeze (%lld ms)",now_ms()-press_start);
-                    }
-                }
-            }
-            if(n<0&&errno!=EAGAIN&&errno!=EINTR) break;
-        }
-    lost:
-        if(pressed&&!restored){ tap(ufd); restored=1; pressed=0; }
-        ioctl(src,EVIOCGRAB,0); close(src);
-        if(!stop){ LOG("pen disconnected, waiting for it to come back"); sleep(2); }
     }
-    if(ufd>=0){ ioctl(ufd,UI_DEV_DESTROY); close(ufd); }
-    LOG("stopped");
-    return 0;
+    closedir(d);
+    return found;
 }
