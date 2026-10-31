@@ -25,6 +25,10 @@
 
 ## 3. 生命周期
 
+- [ ] **重启设备**（笔保持休眠）：日志顺序应为 `boot launch` → `waiting for the pen` →（拿起笔后）`grabbed /dev/input/eventNN`
+- [ ] 重启后**不允许**出现 `grabbed /dev/input/event9`（平板自带的 `Xiaomi Keyboard` 也声明 F19，抓错它就是 v2.0 的重启失效）
+- [ ] 重启后第一次捏合就能用（不需要手动重启 daemon）
+
 - [ ] 笔休眠后再拿起：日志出现新的 `grabbed`，功能恢复
 - [ ] 软重启（`stop && start system_server` 或系统「重启界面」）：日志出现 `framework restarted, rebuilding virtual keyboard`，之后功能正常
 - [ ] 连续开关模块（`action.sh`）：恢复原厂行为 / 重新接管
