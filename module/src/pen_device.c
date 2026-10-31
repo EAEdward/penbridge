@@ -30,9 +30,16 @@ static int is_ours(const char *node)
     return n > 0 && strstr(buf, "penbridge-virtual") != NULL;
 }
 
-/* Ownership target: the keyboard interface that exposes KEY_F19 (ROM keyCode 194
- * on the Pro pen's pinch). Later nodes are left alone - the pinch is delivered on
- * exactly one interface, and grabbing a second one would duplicate the edge. */
+/* Ownership target: the pen's own keyboard interface - it exposes KEY_F19 (ROM
+ * keyCode 194 on the Pro pen's pinch) *and* carries the pen's name.
+ *
+ * The name is not decoration. The tablet's built-in "Xiaomi Keyboard" also
+ * advertises F19, and at boot the pen is still asleep, so a name-less match
+ * latches onto the wrong node: every pinch then goes to the system unfiltered
+ * and the feature looks dead until the daemon is restarted. Match both.
+ *
+ * Other nodes are left alone as well - the pinch is delivered on exactly one
+ * interface, and grabbing a second one would duplicate the edge. */
 int pen_open(char *path, size_t cap)
 {
     DIR *d = opendir("/dev/input");
@@ -56,6 +63,7 @@ int pen_open(char *path, size_t cap)
         if (ioctl(fd, EVIOCGNAME(sizeof name - 1), name) <= 0 ||
             ioctl(fd, EVIOCGBIT(PB_EV_KEY, sizeof keys), keys) < 0 ||
             !has_bit(keys, PB_KEY_F19) ||
+            !strstr(name, "Focus Pen") ||
             is_ours(de->d_name)) {
             close(fd);
             continue;

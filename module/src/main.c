@@ -86,16 +86,22 @@ int main(void)
     signal(SIGTERM, on_signal);
 
     int ufd = -1;
+    int waiting = 0;
     pid_t ss = system_server_pid();
 
     while (!stop) {
         char path[128];
         int src = pen_open(path, sizeof path);
         if (src < 0) {
+            /* No pen yet (asleep, or not paired): wait, never grab a lookalike. */
+            if (!waiting)
+                pb_log("waiting for the pen");
+            waiting = 1;
             if (!stop)
                 sleep(2);
             continue;
         }
+        waiting = 0;
         if (ioctl(src, EVIOCGRAB, 1) < 0) {
             /* Never run ungrabbed: the system would see every key as well and the
              * tool would flip twice per edge. */

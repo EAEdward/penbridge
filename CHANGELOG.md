@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## v2.1 — 2026-10-31
+
+修 v2.0 的重启回归：**开机后功能失效**。
+
+* 根因：重写时把「只抓名为 *Focus Pen* 的键盘接口」这个条件弄丢了，只剩「声明了 KEY_F19」。
+  开机时笔还在休眠、节点不存在，daemon 就抓了平板的 `Xiaomi Keyboard`（`event9`，它也声明 F19），
+  真正的笔醒来后从没被独占，捏合全部走原厂路径 —— 表现就是「重启后功能失效」。
+* 修复：恢复名称判定（`Focus Pen` + KEY_F19 + 不是自己的 `penbridge-virtual`），没有匹配就
+  `waiting for the pen` 每 2 秒重试，**绝不抓相似的节点**。
+* 实测：同一台机器上 `Xiaomi Keyboard` 仍在，daemon 正确选择 `Xiaomi Focus Pen Pro Keyboard`；
+  fast pinch 仍然是「一对按键 → 300 ms 后第二对」。
+
 ## v2.0 — 2026-10-30
 
 响应「重构：抓事件、劫持、重发，只保留捏下切换 / 松手换回，全部瞬发」。源码按职责拆开重写，
